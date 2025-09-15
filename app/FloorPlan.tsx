@@ -1,15 +1,15 @@
 "use client";
 
+import Konva from "konva";
 import React, { useEffect, useRef, useState } from "react";
 import {
   Stage,
   Layer,
-  Circle,
+  Rect,
   Group,
   Text,
   Image as KonvaImage,
 } from "react-konva";
-import Konva from "konva";
 
 function useImage(url: string | null) {
   const [image, setImage] = useState<HTMLImageElement | null>(null);
@@ -31,6 +31,7 @@ type Seat = {
   y: number;
   radius: number;
   fill: string;
+  visible?: boolean; // new property
 };
 
 const STORAGE_KEY = "floorplan_v3_seats_only";
@@ -44,9 +45,11 @@ export default function FloorPlanEditor() {
   const [seats, setSeats] = useState<Seat[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  // Editing state (stable and simple)
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState<string>("");
+
+  // modal/panel visibility
+  const [sidebarVisible, setSidebarVisible] = useState<boolean>(false);
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const stageRef = useRef<Konva.Stage | null>(null);
@@ -54,34 +57,60 @@ export default function FloorPlanEditor() {
 
   const background = useImage("/floorplan.png");
 
-  const [stageSize, setStageSize] = useState({ width: 800, height: 600 });
+  // Stage is full viewport (canvas always full width)
+  const [stageSize, setStageSize] = useState({
+    width: typeof window !== "undefined" ? window.innerWidth : 800,
+    height: typeof window !== "undefined" ? window.innerHeight : 600,
+  });
+
   useEffect(() => {
-    function updateSize() {
+    function updateSizeFromContainer() {
       const el = containerRef.current;
       if (el) {
         setStageSize({ width: el.clientWidth, height: el.clientHeight });
       } else {
-        setStageSize({
-          width: window.innerWidth - RIGHT_WIDTH,
-          height: window.innerHeight,
-        });
+        setStageSize({ width: window.innerWidth, height: window.innerHeight });
       }
     }
-    updateSize();
-    window.addEventListener("resize", updateSize);
-    return () => window.removeEventListener("resize", updateSize);
+
+    updateSizeFromContainer();
+    const onWin = () => updateSizeFromContainer();
+    window.addEventListener("resize", onWin);
+
+    let ro: ResizeObserver | null = null;
+    if (typeof window !== "undefined" && "ResizeObserver" in window) {
+      ro = new ResizeObserver(() => updateSizeFromContainer());
+      if (containerRef.current) ro.observe(containerRef.current);
+    }
+
+    return () => {
+      window.removeEventListener("resize", onWin);
+      try {
+        ro?.disconnect();
+      } catch {}
+    };
   }, []);
 
-  // Load seats from localStorage
+  // Load seats (migration)
   useEffect(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
-        setSeats(JSON.parse(raw));
+        const parsed = JSON.parse(raw) as Partial<Seat>[];
+        const migrated: Seat[] = parsed.map((s) => ({
+          id: s.id ?? uid("S-"),
+          label: s.label ?? "0",
+          name: s.name ?? "",
+          x: s.x ?? stageSize.width / 2,
+          y: s.y ?? stageSize.height / 2,
+          radius: s.radius ?? 24, // <-- just use default radius
+          fill: s.fill ?? "#ffffff",
+          visible: s.visible ?? true,
+        }));
+        setSeats(migrated);
         return;
       }
     } catch {}
-    // defaults
     setSeats([
       {
         id: "S1",
@@ -91,6 +120,7 @@ export default function FloorPlanEditor() {
         y: 120,
         radius: 24,
         fill: "#ffffff",
+        visible: true,
       },
       {
         id: "S2",
@@ -100,6 +130,7 @@ export default function FloorPlanEditor() {
         y: 220,
         radius: 24,
         fill: "#ffffff",
+        visible: true,
       },
       {
         id: "S3",
@@ -109,18 +140,17 @@ export default function FloorPlanEditor() {
         y: 360,
         radius: 24,
         fill: "#ffffff",
+        visible: true,
       },
     ]);
-  }, []);
+  }, [stageSize.width, stageSize.height]);
 
-  // Save seats
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(seats));
     } catch {}
   }, [seats]);
 
-  // Focus the input when entering editing mode
   useEffect(() => {
     if (editingId && inputRef.current) {
       inputRef.current.focus();
@@ -128,7 +158,21 @@ export default function FloorPlanEditor() {
     }
   }, [editingId]);
 
-  // Helpers
+  // keyboard: 'b' toggle, Escape close
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const tag = (document.activeElement?.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea") return;
+      if (e.key.toLowerCase() === "b") {
+        setSidebarVisible((v) => !v);
+      } else if (e.key === "Escape") {
+        setSidebarVisible(false);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   function addSeat() {
     const id = uid("S-");
     const s: Seat = {
@@ -139,14 +183,39 @@ export default function FloorPlanEditor() {
       y: stageSize.height / 2,
       radius: 24,
       fill: "#ffffff",
+      visible: true,
     };
     setSeats((p) => [...p, s]);
     setSelectedId(s.id);
-    // start editing name immediately
     setTimeout(() => {
       setEditingId(s.id);
       setEditingText("");
     }, 30);
+  }
+
+  function getTextColor(fill: string) {
+    // Convert hex to RGB
+    if (!fill.startsWith("#") || (fill.length !== 7 && fill.length !== 4))
+      return "#000";
+
+    let r: number, g: number, b: number;
+
+    if (fill.length === 7) {
+      r = parseInt(fill.slice(1, 3), 16);
+      g = parseInt(fill.slice(3, 5), 16);
+      b = parseInt(fill.slice(5, 7), 16);
+    } else {
+      // shorthand e.g. #fff
+      r = parseInt(fill[1] + fill[1], 16);
+      g = parseInt(fill[2] + fill[2], 16);
+      b = parseInt(fill[3] + fill[3], 16);
+    }
+
+    // Calculate luminance (0 = dark, 255 = bright)
+    const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+
+    // if bright, use black text; if dark, use white text
+    return luminance > 186 ? "#000000" : "#ffffff";
   }
 
   function confirmAndDelete(id: string) {
@@ -155,7 +224,7 @@ export default function FloorPlanEditor() {
       seat?.name && seat.name.trim().length > 0
         ? seat!.name
         : seat?.label ?? id;
-    if (window.confirm(`Delete circle "${name}" (${id}) ?`)) {
+    if (window.confirm(`Delete rectangle "${name}" (${id}) ?`)) {
       setSeats((p) => p.filter((s) => s.id !== id));
       if (selectedId === id) setSelectedId(null);
       if (editingId === id) {
@@ -169,7 +238,6 @@ export default function FloorPlanEditor() {
     setSeats((p) => p.map((s) => (s.id === id ? { ...s, ...patch } : s)));
   }
 
-  // Compute input center position relative to viewport for the editing seat
   function getInputStyleForSeat(id: string | null) {
     if (!id || !stageRef.current)
       return { display: "none" } as React.CSSProperties;
@@ -178,23 +246,20 @@ export default function FloorPlanEditor() {
     try {
       const container = stageRef.current.container();
       const rect = container.getBoundingClientRect();
-      // seat.x/y are stage coords (top-left 0,0)
       const left = rect.left + seat.x;
       const top = rect.top + seat.y;
-      // center with transform
       return {
         position: "fixed",
         left,
         top,
         transform: "translate(-50%, -50%)",
-        zIndex: 2000,
+        zIndex: 9999,
       } as React.CSSProperties;
     } catch {
       return { display: "none" } as React.CSSProperties;
     }
   }
 
-  // Commit editing text to seat name
   function commitEdit() {
     if (!editingId) {
       setEditingText("");
@@ -210,222 +275,37 @@ export default function FloorPlanEditor() {
     setEditingText("");
   }
 
+  // toggle sidebar handler
+  function toggleSidebar() {
+    setSidebarVisible((v) => !v);
+  }
+
   return (
     <>
-      {/* Right sidebar only */}
-      <div
-        style={{
-          position: "fixed",
-          right: 0,
-          top: 0,
-          bottom: 0,
-          width: RIGHT_WIDTH,
-          background: "#fafafa",
-          borderLeft: "1px solid #ddd",
-          padding: 12,
-          boxSizing: "border-box",
-          overflow: "auto",
-          fontFamily:
-            "system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial",
-        }}
-      >
-        <h3 style={{ margin: "6px 0 12px 0" }}>Circles</h3>
+      {/* small handle (secret) to open the panel */}
+      {!sidebarVisible && (
+        <button
+          onClick={toggleSidebar}
+          title='Open sidebar (or press "b")'
+          style={{
+            position: "fixed",
+            right: 12,
+            top: 12,
+            zIndex: 4000,
+            width: 36,
+            height: 36,
+            borderRadius: 8,
+            border: "1px solid #ddd",
+            background: "#fff",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
+            cursor: "pointer",
+          }}
+        >
+          ≡
+        </button>
+      )}
 
-        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-          <button onClick={addSeat}>➕ Add Circle</button>
-          <button
-            onClick={() => {
-              // center view on selected if any
-              if (!selectedId) return alert("Select a circle first.");
-              const s = seats.find((x) => x.id === selectedId);
-              if (!s) return;
-              // start editing name
-              setEditingId(s.id);
-              setEditingText(s.name ?? "");
-            }}
-          >
-            ✏️ Rename Selected
-          </button>
-          <button
-            onClick={() => {
-              if (!selectedId) return alert("Select a circle first.");
-              const s = seats.find((x) => x.id === selectedId);
-              if (!s) return alert("No selected circle");
-              const color = prompt("Enter hex color (e.g. #ffcc00):", s.fill);
-              if (color) updateSeat(selectedId, { fill: color });
-            }}
-          >
-            🎨 Color Selected
-          </button>
-        </div>
-
-        <div style={{ marginBottom: 10 }}>
-          <strong>Selected:</strong>{" "}
-          {selectedId ? (
-            selectedId
-          ) : (
-            <span style={{ color: "#888" }}>none</span>
-          )}
-        </div>
-
-        {/* Selected controls */}
-        {selectedId && (
-          <div
-            style={{
-              marginBottom: 12,
-              padding: 8,
-              border: "1px solid #eee",
-              borderRadius: 6,
-            }}
-          >
-            <div style={{ marginBottom: 8 }}>
-              <label>
-                Color:{" "}
-                <input
-                  type="color"
-                  value={
-                    seats.find((s) => s.id === selectedId)?.fill || "#ffffff"
-                  }
-                  onChange={(e) =>
-                    updateSeat(selectedId, { fill: e.target.value })
-                  }
-                />
-              </label>
-            </div>
-            <div style={{ marginBottom: 8 }}>
-              <label>
-                Size:{" "}
-                <input
-                  type="range"
-                  min={10}
-                  max={60}
-                  value={seats.find((s) => s.id === selectedId)?.radius ?? 24}
-                  onChange={(e) =>
-                    updateSeat(selectedId, { radius: +e.target.value })
-                  }
-                />
-              </label>
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => confirmAndDelete(selectedId)}>
-                Delete
-              </button>
-              <button
-                onClick={() => {
-                  const s = seats.find((x) => x.id === selectedId);
-                  if (!s) return;
-                  setEditingId(s.id);
-                  setEditingText(s.name ?? "");
-                }}
-              >
-                Rename
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Table-like list */}
-        <div style={{ borderTop: "1px solid #eee", paddingTop: 8 }}>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "40px 1fr 110px 60px 110px",
-              gap: 8,
-              alignItems: "center",
-              padding: "8px 4px",
-              fontWeight: 700,
-            }}
-          >
-            <div>#</div>
-            <div>Name</div>
-            <div>ID</div>
-            <div>Color</div>
-            <div>Actions</div>
-          </div>
-          <div>
-            {seats.length === 0 && <div style={{ padding: 8 }}>No circles</div>}
-            {seats.map((s, idx) => {
-              const isSelected = selectedId === s.id;
-              return (
-                <div
-                  key={s.id}
-                  onClick={() => setSelectedId(s.id)}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "40px 1fr 110px 60px 110px",
-                    gap: 8,
-                    alignItems: "center",
-                    padding: "8px 4px",
-                    cursor: "pointer",
-                    background: isSelected ? "#fff6d6" : "transparent",
-                    borderBottom: "1px solid #f0f0f0",
-                  }}
-                >
-                  <div style={{ fontWeight: 600 }}>{idx + 1}</div>
-
-                  <div
-                    style={{
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {s.name && s.name.trim().length > 0 ? s.name : s.label}
-                  </div>
-
-                  <div style={{ color: "#666", fontSize: 12, fontWeight: 600 }}>
-                    {/* {s.id} */}
-                    {s.name}
-                  </div>
-
-                  <div>
-                    <input
-                      title="Change color"
-                      type="color"
-                      value={s.fill}
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={(e) =>
-                        updateSeat(s.id, { fill: e.target.value })
-                      }
-                    />
-                  </div>
-
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: 6,
-                      justifyContent: "flex-end",
-                    }}
-                  >
-                    <button
-                      title="Rename"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setEditingId(s.id);
-                        setEditingText(s.name ?? "");
-                        setSelectedId(s.id);
-                      }}
-                    >
-                      ✏️
-                    </button>
-                    <button
-                      title="Delete"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        confirmAndDelete(s.id);
-                      }}
-                    >
-                      🗑️
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      {/* Canvas area (left side) */}
+      {/* Canvas area -- always full width */}
       <div
         ref={containerRef}
         style={{
@@ -433,7 +313,7 @@ export default function FloorPlanEditor() {
           left: 0,
           top: 0,
           bottom: 0,
-          right: RIGHT_WIDTH,
+          right: 0,
           background: "#fff",
           overflow: "hidden",
         }}
@@ -450,6 +330,7 @@ export default function FloorPlanEditor() {
             )}
 
             {seats.map((s) => {
+              if (!s.visible) return null; // skip hidden seats
               const displayText =
                 s.name && s.name.trim().length > 0 ? s.name : s.label;
               return (
@@ -458,26 +339,24 @@ export default function FloorPlanEditor() {
                   x={s.x}
                   y={s.y}
                   draggable
-                  onDragMove={(e) => {
-                    // while dragging keep state responsive
-                    const nx = e.target.x();
-                    const ny = e.target.y();
-                    updateSeat(s.id, { x: nx, y: ny });
-                  }}
-                  onDragEnd={(e) => {
-                    updateSeat(s.id, { x: e.target.x(), y: e.target.y() });
-                  }}
-                  onClick={(e) => {
-                    setSelectedId(s.id);
-                  }}
-                  onDblClick={(e) => {
+                  onDragMove={(e) =>
+                    updateSeat(s.id, { x: e.target.x(), y: e.target.y() })
+                  }
+                  onDragEnd={(e) =>
+                    updateSeat(s.id, { x: e.target.x(), y: e.target.y() })
+                  }
+                  onClick={() => setSelectedId(s.id)}
+                  onDblClick={() => {
                     setSelectedId(s.id);
                     setEditingId(s.id);
                     setEditingText(s.name ?? "");
                   }}
                 >
-                  <Circle
-                    radius={s.radius}
+                  <Rect
+                    width={s.radius * 2.5}
+                    height={s.radius * 2.5}
+                    offsetX={(s.radius * 2.5) / 2}
+                    offsetY={(s.radius * 2.5) / 2}
                     fill={s.fill}
                     stroke={s.id === selectedId ? "orange" : "black"}
                     strokeWidth={s.id === selectedId ? 3 : 1}
@@ -489,6 +368,7 @@ export default function FloorPlanEditor() {
                     align="center"
                     offsetX={s.radius}
                     offsetY={-7}
+                    fill={getTextColor(s.fill)}
                     listening={false}
                   />
                 </Group>
@@ -498,7 +378,7 @@ export default function FloorPlanEditor() {
         </Stage>
       </div>
 
-      {/* Inline rename input (centered on the circle) */}
+      {/* Inline rename input */}
       <div style={getInputStyleForSeat(editingId)}>
         {editingId && (
           <input
@@ -524,6 +404,264 @@ export default function FloorPlanEditor() {
           />
         )}
       </div>
+
+      {/* Dim overlay: visual only, pointerEvents none so canvas remains interactive */}
+      {sidebarVisible && (
+        <div
+          style={{
+            position: "fixed",
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+            background: "rgba(0,0,0,0.20)",
+            zIndex: 4000,
+            pointerEvents: "none", // IMPORTANT: allows Konva/canvas to keep receiving pointer events
+          }}
+        />
+      )}
+
+      {/* Right-side panel: full height (top->bottom->right) */}
+      {sidebarVisible && (
+        <aside
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            top: 0,
+            right: 0,
+            bottom: 0,
+            width: RIGHT_WIDTH,
+            background: "#fafafa",
+            borderLeft: "1px solid #ddd",
+            padding: 12,
+            boxSizing: "border-box",
+            overflow: "auto",
+            zIndex: 4100, // above overlay
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+            }}
+          >
+            <h3 style={{ margin: "6px 0 12px 0" }}>
+              Rectangles (scaled by radius)
+            </h3>
+            <div>
+              <button onClick={() => setSidebarVisible(false)}>Close ✖</button>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <button onClick={addSeat}>➕ Add Rectangle</button>
+            <button
+              onClick={() => {
+                if (!selectedId) return alert("Select a rectangle first.");
+                const s = seats.find((x) => x.id === selectedId);
+                if (!s) return;
+                setEditingId(s.id);
+                setEditingText(s.name ?? "");
+              }}
+            >
+              ✏️ Rename Selected
+            </button>
+            <button
+              onClick={() => {
+                if (!selectedId) return alert("Select a rectangle first.");
+                const s = seats.find((x) => x.id === selectedId);
+                if (!s) return alert("No selected rectangle");
+                const color = prompt("Enter hex color (e.g. #ffcc00):", s.fill);
+                if (color) updateSeat(selectedId, { fill: color });
+              }}
+            >
+              🎨 Color Selected
+            </button>
+          </div>
+
+          <div style={{ marginBottom: 10 }}>
+            <strong>Selected:</strong>{" "}
+            {selectedId ? (
+              selectedId
+            ) : (
+              <span style={{ color: "#888" }}>none</span>
+            )}
+          </div>
+
+          {selectedId && (
+            <div
+              style={{
+                marginBottom: 12,
+                padding: 8,
+                border: "1px solid #eee",
+                borderRadius: 6,
+              }}
+            >
+              <div style={{ marginBottom: 8 }}>
+                <label>
+                  Color:{" "}
+                  <input
+                    type="color"
+                    value={
+                      seats.find((s) => s.id === selectedId)?.fill || "#ffffff"
+                    }
+                    onChange={(e) =>
+                      updateSeat(selectedId, { fill: e.target.value })
+                    }
+                  />
+                </label>
+              </div>
+              <div style={{ marginBottom: 8 }}>
+                <label>
+                  Radius:{" "}
+                  <input
+                    type="range"
+                    min={8}
+                    max={80}
+                    value={seats.find((s) => s.id === selectedId)?.radius ?? 24}
+                    onChange={(e) =>
+                      updateSeat(selectedId, { radius: +e.target.value })
+                    }
+                  />{" "}
+                  {seats.find((s) => s.id === selectedId)?.radius ?? 24}px{" "}
+                  (diameter:{" "}
+                  {(seats.find((s) => s.id === selectedId)?.radius ?? 24) * 2}
+                  px)
+                </label>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => confirmAndDelete(selectedId)}>
+                  Delete
+                </button>
+                <button
+                  onClick={() => {
+                    const s = seats.find((x) => x.id === selectedId);
+                    if (!s) return;
+                    setEditingId(s.id);
+                    setEditingText(s.name ?? "");
+                  }}
+                >
+                  Rename
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div style={{ borderTop: "1px solid #eee", paddingTop: 8 }}>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "40px 1fr 110px 60px 110px",
+                gap: 8,
+                alignItems: "center",
+                padding: "8px 4px",
+                fontWeight: 700,
+              }}
+            >
+              <div>#</div>
+              <div>Name</div>
+              <div>ID</div>
+              <div>Color</div>
+              <div>Actions</div>
+            </div>
+            <div>
+              {seats.length === 0 && (
+                <div style={{ padding: 8 }}>No rectangles</div>
+              )}
+              {seats.map((s, idx) => {
+                const isSelected = selectedId === s.id;
+                return (
+                  <div
+                    key={s.id}
+                    onClick={() => setSelectedId(s.id)}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "40px 1fr 110px 60px 110px",
+                      gap: 8,
+                      alignItems: "center",
+                      padding: "8px 4px",
+                      cursor: "pointer",
+                      background: isSelected ? "#fff6d6" : "transparent",
+                      borderBottom: "1px solid #f0f0f0",
+                    }}
+                  >
+                    <div style={{ fontWeight: 600 }}>{idx + 1}</div>
+
+                    <div
+                      style={{
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {s.name && s.name.trim().length > 0 ? s.name : s.label}
+                    </div>
+
+                    <div
+                      style={{ color: "#666", fontSize: 12, fontWeight: 600 }}
+                    >
+                      {s.name}
+                    </div>
+
+                    <div>
+                      <input
+                        title="Change color"
+                        type="color"
+                        value={s.fill}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) =>
+                          updateSeat(s.id, { fill: e.target.value })
+                        }
+                      />
+                    </div>
+
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: 6,
+                        justifyContent: "flex-end",
+                      }}
+                    >
+                      <button
+                        title={s.visible ? "Hide seat" : "Show seat"}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          updateSeat(s.id, { visible: !s.visible });
+                        }}
+                      >
+                        {s.visible ? "👁️" : "🙈"}
+                      </button>
+                      <button
+                        title="Rename"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEditingId(s.id);
+                          setEditingText(s.name ?? "");
+                          setSelectedId(s.id);
+                        }}
+                      >
+                        ✏️
+                      </button>
+                      <button
+                        title="Delete"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          confirmAndDelete(s.id);
+                        }}
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </aside>
+      )}
     </>
   );
 }
